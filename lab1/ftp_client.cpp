@@ -9,10 +9,8 @@ char cmd[128], ip[16];
 int port, sockid;
 bool connected = false;
 
-void open()
-{
-    if (connected)
-    {
+void open() {
+    if (connected) {
         std::cin >> cmd >> cmd;
         printf("Connection already established\n");
         return;
@@ -36,6 +34,18 @@ void open()
         connected = true;
     }
 }
+void quit() {
+    if (!connected)
+        exit(0);
+    struct message msg = QUIT_CONN_REQUEST, reply;
+    Send(sockid, &msg, 12, 0);
+    Recv(sockid, &reply, 12, 0);
+    if (memcmp(reply.m_protocol, protocol, MAGIC_NUMBER_LENGTH) == 0 && reply.m_type == QUIT_CONN_REPLY.m_type) {
+        printf("Connection Closed\n");
+        close(sockid);
+        connected = false;
+    }
+}
 
 int main() {
     while (1) {
@@ -43,22 +53,10 @@ int main() {
         if (connected) printf("(%s:%d)> ", ip, port);
         else printf("(None)> ");
         std::cin >> cmd;
-        if (strcmp(cmd, "open") == 0) {
+        if (strcmp(cmd, "open") == 0)
             open();
-            continue;
-        }
-        if (strcmp(cmd, "quit") == 0) {
-            if (!connected)
-                break;
-            struct message msg = QUIT_CONN_REQUEST, reply;
-            Send(sockid, &msg, 12, 0);
-            Recv(sockid, &reply, 12, 0);
-            if (memcmp(reply.m_protocol, protocol, MAGIC_NUMBER_LENGTH) == 0 && reply.m_type == QUIT_CONN_REPLY.m_type) {
-                printf("Connection Closed\n");
-                close(sockid);
-                connected = false;
-            }
-        }
+        else if (strcmp(cmd, "quit") == 0) 
+            quit();
     }
     return 0;
 }

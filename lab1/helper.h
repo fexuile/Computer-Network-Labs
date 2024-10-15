@@ -1,6 +1,7 @@
 #include <string.h>
 const int MAGIC_NUMBER_LENGTH = 6;
 const int MAX_LINE_LENGTH = 128;
+const int MAX_THREAD_COUNTS = 20;
 #define UNUSED 0
 const char protocol[] = {'\xc1', '\xa1', '\x10', 'f', 't', 'p'};
 enum type {
