@@ -1,15 +1,8 @@
 #include <iostream>
 #include <sys/socket.h>
 #include <arpa/inet.h>
-
-const int MAGIC_NUMBER_LENGTH = 6;
-
-struct message{
-    char m_protocol[MAGIC_NUMBER_LENGTH]; /* protocol magic number (6 bytes) */
-    char m_type;                          /* type (1 byte) */
-    char m_status;                      /* status (1 byte) */
-    uint32_t m_length;                    /* length (4 bytes) in Big endian*/
-} __attribute__ ((packed));
+#include <unistd.h>
+#include "helper.h"
 
 int main(int argc, char* argv[]) {
     if(argc <= 2) {
@@ -35,8 +28,25 @@ int main(int argc, char* argv[]) {
     }
     while(1) {
         struct message msg;
-        recv(client, &msg, sizeof(msg), 0);
-        printf("Received message: %s\n", msg.m_protocol);
+        Recv(client, &msg, 12, 0);
+        if(memcmp(msg.m_protocol, protocol, MAGIC_NUMBER_LENGTH) != 0) {
+            printf("ERROR: protocol mismatch!\n");
+            return 0;
+        }
+        printf("%s %x\n", msg.m_protocol, msg.m_type);
+        if(msg.m_type == 0xA1) {
+            struct message reply = OPEN_CONN_REPLY;
+            if(memcmp(reply.m_protocol, protocol, MAGIC_NUMBER_LENGTH) != 0) {
+                printf("ERROR: protocol mismatch!\n");
+                return 0;
+            }
+            puts("OK");
+            Send(client, &reply, 12, 0);
+        }
+        if(msg.m_type == 0xAD) {
+            struct message reply = QUIT_CONN_REPLY;
+            Send(client, &reply, 12, 0);
+        }
     }
     return 0;
 }

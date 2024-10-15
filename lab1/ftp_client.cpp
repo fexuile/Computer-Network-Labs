@@ -1,129 +1,63 @@
 #include <iostream>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <pthread.h>
+#include <unistd.h>
 #include <arpa/inet.h>
+#include "helper.h"
 
-const int MAX_LINE_LENGTH = 128;
-const int MAGIC_NUMBER_LENGTH = 6;
-char cmdline[MAX_LINE_LENGTH];
+char cmd[128], ip[16];
+int port, sockid;
+bool connected = false;
 
-struct message{
-    char m_protocol[MAGIC_NUMBER_LENGTH]; /* protocol magic number (6 bytes) */
-    char m_type;                          /* type (1 byte) */
-    char m_status;                      /* status (1 byte) */
-    uint32_t m_length;                    /* length (4 bytes) in Big endian*/
-} __attribute__ ((packed));
-
-enum type {
-    BUILTIN_OPEN,
-    BUILTIN_LS,
-    BUILTIN_CD,
-    BUILTIN_GET,
-    BUILTIN_PUT,
-    BUILTIN_SHA256,
-    BUILTIN_QUIT,
-    ERROR_COMMAND
-};
-struct command {
-    int port;
-    char ip[16];
-    type command_type;
-    char arg[128];
-};
-
-void parse_command(char *cmdline, struct command *cmd) {
-    cmdline = strtok(cmdline, "\n");
-    char *token = strtok(cmdline, " ");
-    if(strcmp(token, "quit") == 0) {
-        cmd->command_type = BUILTIN_QUIT;
+void open()
+{
+    if (connected)
+    {
+        std::cin >> cmd >> cmd;
+        printf("Connection already established\n");
         return;
     }
-    if(strcmp(token, "open") == 0) {
-        cmd->command_type = BUILTIN_OPEN;
-        token = strtok(NULL, " ");
-        strcpy(cmd->ip, token);
-        token = strtok(NULL, " ");
-        cmd->port = atoi(token);
-        return;
-    }
-    if(strcmp(token, "ls") == 0) {
-        cmd->command_type = BUILTIN_LS;
-        return;
-    }
-    if(strcmp(token, "cd") == 0) {
-        cmd->command_type = BUILTIN_CD;
-        token = strtok(NULL, " ");
-        strcpy(cmd->arg, token);
-        return;
-    }
-    if(strcmp(token, "get") == 0) {
-        cmd->command_type = BUILTIN_GET;
-        token = strtok(NULL, " ");
-        strcpy(cmd->arg, token);
-        return;
-    }
-    if(strcmp(token, "put") == 0) {
-        cmd->command_type = BUILTIN_PUT;
-        token = strtok(NULL, " ");
-        strcpy(cmd->arg, token);
-        return;
-    }
-    if(strcmp(token, "sha256") == 0) {
-        cmd->command_type = BUILTIN_SHA256;
-        token = strtok(NULL, " ");
-        strcpy(cmd->arg, token);
-        return;
-    }
-    cmd->command_type = ERROR_COMMAND;
-    return;
-}
-void open(char *ip, int port) {
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if(sockfd < 0) {
-        printf("ERROR: socket creation failed!\n");
-        return;
-    }
+    std::cin >> ip >> port;
+    sockid = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in addr;
-    addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
+    addr.sin_family = AF_INET;
     inet_pton(AF_INET, ip, &addr.sin_addr);
-    connect(sockfd, (struct sockaddr*)&addr, sizeof(addr));
-    
+    int ret = connect(sockid, (struct sockaddr *)&addr, sizeof(addr));
+    if (ret < 0) {
+        printf("Connection Failed\n");
+        return;
+    }
+    struct message msg = OPEN_CONN_REQUEST, reply;
+    Send(sockid, &msg, 12, 0);
+    Recv(sockid, &reply, 12, 0);
+    if (memcmp(reply.m_protocol, protocol, MAGIC_NUMBER_LENGTH) == 0 && reply.m_type == OPEN_CONN_REPLY.m_type && reply.m_status == 1) {
+        printf("Connection Established\n");
+        connected = true;
+    }
 }
 
 int main() {
-    while(1) {
-        printf("Client(none)>");
-        fgets(cmdline, MAX_LINE_LENGTH, stdin);
-        struct command *cmd = (struct command *)malloc(sizeof(struct command));
-        parse_command(cmdline, cmd);
-        switch(cmd->command_type){
-            case BUILTIN_QUIT:
-                return 0;
-            case BUILTIN_OPEN:
-                open(cmd->ip, cmd->port);
+    while (1) {
+        printf("Client");
+        if (connected) printf("(%s:%d)> ", ip, port);
+        else printf("(None)> ");
+        std::cin >> cmd;
+        if (strcmp(cmd, "open") == 0) {
+            open();
+            continue;
+        }
+        if (strcmp(cmd, "quit") == 0) {
+            if (!connected)
                 break;
-            case BUILTIN_LS:
-                printf("ls\n");
-                break;
-            case BUILTIN_CD:
-                printf("cd\n");
-                break;
-            case BUILTIN_GET:
-                printf("get\n");
-                break;  
-            case BUILTIN_PUT:   
-                printf("put\n");
-                break;  
-            case BUILTIN_SHA256:    
-                printf("sha256\n");
-                break;  
-            case ERROR_COMMAND: 
-                printf("Bad request!\n");
-                break;
+            struct message msg = QUIT_CONN_REQUEST, reply;
+            Send(sockid, &msg, 12, 0);
+            Recv(sockid, &reply, 12, 0);
+            if (memcmp(reply.m_protocol, protocol, MAGIC_NUMBER_LENGTH) == 0 && reply.m_type == QUIT_CONN_REPLY.m_type) {
+                printf("Connection Closed\n");
+                close(sockid);
+                connected = false;
+            }
         }
     }
     return 0;
