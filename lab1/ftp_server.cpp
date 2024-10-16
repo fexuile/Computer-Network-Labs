@@ -88,8 +88,8 @@ void* doit(void *args) {
                 char *buffer = (char *)malloc(FILE_MAX_SIZE << 2);
                 length = fread(buffer, 1, FILE_MAX_SIZE, file);
                 Send(client, buffer, length, 0);
+                fclose(file);
             }
-            fclose(file);
             free(filename);
         }
         else if(msg.m_type == 0xA9) {
@@ -140,9 +140,9 @@ void* doit(void *args) {
                 reply.m_length = htonl(length + 12);
                 Send(client, &reply, 12, 0);
                 Send(client, buffer, length, 0);
-                free(buffer);
+                free(buffer);fclose(file);
             }
-            fclose(file);free(filename);
+            free(filename);
         }
         else if (msg.m_type == 0xAD) {
             struct message reply = QUIT_CONN_REPLY;
