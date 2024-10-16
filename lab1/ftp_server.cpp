@@ -1,4 +1,5 @@
 #include <iostream>
+#include <string>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -9,6 +10,7 @@ char ip[16];
 struct Info {
     int client;
     pthread_t thread;
+    char dir[MAX_LINE_LENGTH];
 }info[MAX_THREAD_COUNTS];
 
 void* doit(void *args) {
@@ -19,16 +21,103 @@ void* doit(void *args) {
         Recv(client, &msg, 12, 0);
         if (memcmp(msg.m_protocol, protocol, MAGIC_NUMBER_LENGTH) != 0) {
             printf("ERROR: protocol mismatch!\n");
-            return NULL;
+            pthread_exit(NULL);
         }
         if (msg.m_type == 0xA1) {
             struct message reply = OPEN_CONN_REPLY;
             if (memcmp(reply.m_protocol, protocol, MAGIC_NUMBER_LENGTH) != 0)
             {
                 printf("ERROR: protocol mismatch!\n");
-                return NULL;    
+                pthread_exit(NULL);
             }
             Send(client, &reply, 12, 0);
+        }
+        else if(msg.m_type == 0xA3) {
+            struct message reply = LS_CONN_REPLY;
+            int length;
+            FILE *tmp;
+            tmp = popen("ls", "r");
+            static char buffer[MAX_LINE_LENGTH];
+            length = fread(buffer, 1, MAX_LINE_LENGTH, tmp);
+            pclose(tmp);
+            buffer[length++] = '\0';
+            reply.m_length = htonl(length + 12);
+            Send(client, &reply, 12, 0);
+            Send(client, &buffer, length, 0); 
+        }
+        else if(msg.m_type == 0xA5) {
+            
+        }
+        else if(msg.m_type == 0xA7) {
+            struct message reply = GET_REPLY;
+            int length = ntohl(msg.m_length) - 12;
+            static char filename[MAX_LINE_LENGTH];
+            Recv(client, &filename, length, 0);
+            FILE *file = fopen(filename, "r");
+            if(file == NULL) {
+                reply.m_status = 0;
+                Send(client, &reply, 12, 0);
+            }
+            else {
+                reply.m_status = 1;
+                Send(client, &reply, 12, 0);
+                reply = FILE_DATA;
+                fseek(file, 0, SEEK_END);
+                length = ftell(file);
+                rewind(file);
+                reply.m_length = htonl(length + 12);
+                Send(client, &reply, 12, 0);
+                static char buffer[FILE_MAX_SIZE];
+                length = fread(buffer, 1, FILE_MAX_SIZE, file);
+                Send(client, &buffer, length, 0);
+            }
+            fclose(file);
+        }
+        else if(msg.m_type == 0xA9) {
+            struct message reply = PUT_REPLY;
+            int length = ntohl(msg.m_length) - 12;
+            static char filename[MAX_LINE_LENGTH];
+            Recv(client, &filename, length, 0);
+            Send(client, &reply, 12, 0);
+            FILE *file = fopen(filename, "wb");
+            Recv(client, &msg, 12, 0);
+            if(memcmp(msg.m_protocol, protocol, MAGIC_NUMBER_LENGTH) || msg.m_type != FILE_DATA.m_type) {
+                puts("Error in file transfer.");
+                return NULL;
+            }
+            length = ntohl(msg.m_length) - 12;
+            static char buffer[FILE_MAX_SIZE];
+            Recv(client, &buffer, length, 0);
+            fwrite(buffer, 1, length, file);
+            fclose(file);
+        }
+        else if(msg.m_type == 0xAB) {
+            struct message reply = SHA256_REPLY;
+            int length = ntohl(msg.m_length) - 12;
+            static char filename[MAX_LINE_LENGTH];
+            Recv(client, &filename, length, 0);
+            FILE *file = fopen(filename, "r");
+            if(file == NULL) {
+                reply.m_status = 0;
+                Send(client, &reply, 12, 0);
+            }
+            else {
+                reply.m_status = 1;
+                Send(client, &reply, 12, 0);
+                reply = FILE_DATA;
+                FILE *tmp;
+                std::string cmd_str;
+                cmd_str = "sha256sum " + std::string(filename);
+                tmp = popen(cmd_str.c_str(), "r");
+                static char buffer[FILE_MAX_SIZE];
+                length = fread(buffer, 1, FILE_MAX_SIZE, tmp);
+                pclose(tmp);
+                buffer[length++] = '\0';
+                reply.m_length = htonl(length + 12);
+                Send(client, &reply, 12, 0);
+                Send(client, &buffer, length, 0);
+            }
+            fclose(file);
         }
         else if (msg.m_type == 0xAD) {
             struct message reply = QUIT_CONN_REPLY;
