@@ -19,13 +19,11 @@ socklen_t addr_len;
 struct sockaddr_in lstAddr;
 rtp_packet_t receiver_packet, sender_packet;
 
-
 bool checksum(rtp_packet_t packet) {
-    int check_sum = packet.rtp.checksum;
+    uint32_t check_sum = packet.rtp.checksum;
     packet.rtp.checksum = 0;
-    int calc_check_sum = compute_checksum(&packet, sizeof(rtp_header_t) + packet.rtp.length);
-    if(check_sum != calc_check_sum) return false;
-    return true;
+    uint32_t calc_check_sum = compute_checksum(&packet, sizeof(rtp_header_t) + packet.rtp.length);
+    return check_sum == calc_check_sum;
 }
 
 bool out_of_window(uint32_t seq, uint32_t start, int size) {
@@ -59,7 +57,7 @@ void resend_loop(int fd, void* buffer, size_t size, const struct sockaddr *Addr,
 
 void conn() {
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
+    if (sockfd <= 0) {
         LOG_FATAL("Receiver: socket creation failed\n");
     }
     memset(&lstAddr, 0, sizeof(lstAddr));  // lstAddr is the address on which the receiver listens
@@ -103,52 +101,69 @@ void fin(int seq_num) {
     sender_packet.rtp.checksum = compute_checksum(&sender_packet, sizeof(rtp_header_t) + sender_packet.rtp.length);
     sendto(sockfd, &sender_packet, sizeof(rtp_header_t), 0, (struct sockaddr *)&lstAddr, sizeof(lstAddr));
     LOG_DEBUG("Receiver: send FIN packet\n");
+
+    clock_t t = clock();
+    while((double)(clock() - t) / CLOCKS_PER_SEC < 5.0) {
+        int recv_byte = recvfrom(sockfd, &receiver_packet, sizeof(rtp_packet_t), MSG_DONTWAIT, (struct sockaddr *)&lstAddr, &addr_len);
+        if(recv_byte > 0 && checksum(receiver_packet)) {
+            if (receiver_packet.rtp.flags & RTP_FIN) {
+                sendto(sockfd, &sender_packet, sizeof(rtp_header_t), 0, (struct sockaddr *)&lstAddr, sizeof(lstAddr));
+                t = clock();
+            }
+        }
+    }
 }
 
 void GBN() {
     clock_t t = clock();
     FILE *fp = fopen(file_path, "wb");
-    while((double)(clock() - t) / CLOCKS_PER_SEC < 10.0) {
+    while((double)(clock() - t) / CLOCKS_PER_SEC < 5.0) {
         int recv_bytes = recvfrom(sockfd, &receiver_packet, sizeof(receiver_packet), MSG_DONTWAIT, (struct sockaddr *)&lstAddr, &addr_len);
-        if(recv_bytes > 0) {
-            if(checksum(receiver_packet)) {
-                if (receiver_packet.rtp.flags != RTP_FIN && receiver_packet.rtp.flags != 0) {
-                    LOG_DEBUG("Receiver: Fault Syntax.\n");
-                    continue;
-                }
-                int seq_num = receiver_packet.rtp.seq_num;
-                if(out_of_window(seq_num, y, window_size)) {
-                    LOG_DEBUG("Receiver: Sequence Number Out of Range.\n");
-                    continue;
-                }
-                if (receiver_packet.rtp.seq_num != y) {
-                    sendto(sockfd, &sender_packet, sizeof(rtp_header_t), 0, (struct sockaddr *)&lstAddr, sizeof(lstAddr));
-                    LOG_DEBUG("Receiver: Received Fault Packet. Resend seq %d\n", y - 1);
-                }
-                else {
-                    if (receiver_packet.rtp.flags == RTP_FIN) {
-                        LOG_DEBUG("Receiver: Connection Finished.\n");
-                        fin(receiver_packet.rtp.seq_num);
-                        return;
-                    }
-                    else{
-                        int len = receiver_packet.rtp.length;
-                        memcpy(buffer, receiver_packet.payload, len);
-                        fwrite(buffer, 1, len, fp);
-                        LOG_DEBUG("Receiver: Save the data.\n");
-
-                        sender_packet.rtp.flags = RTP_ACK;
-                        sender_packet.rtp.length = 0;
-                        sender_packet.rtp.checksum = 0;
-                        sender_packet.rtp.seq_num = (++y);
-                        sender_packet.rtp.checksum = compute_checksum(&sender_packet, sizeof(rtp_header_t));
-                        sendto(sockfd, &sender_packet, sizeof(rtp_header_t), 0, (struct sockaddr *)&lstAddr, sizeof(lstAddr));
-                        LOG_DEBUG("Receiver: Received Packet seq %d\n", y - 1);
-                    }
-                }
-            }
-            t = clock();
+        if(recv_bytes <= 0) continue;
+        if(!checksum(receiver_packet)) {
+            LOG_DEBUG("Receiver: Packet corrupted.\n");
+            continue;
         }
+        if (receiver_packet.rtp.flags != RTP_FIN && receiver_packet.rtp.flags != 0) {
+            LOG_DEBUG("Receiver: Fault Syntax.\n");
+            continue;
+        }
+        int seq_num = receiver_packet.rtp.seq_num;
+        if(out_of_window(seq_num, y, window_size)) {
+            LOG_DEBUG("Receiver: Sequence Number Out of Range.\n");
+            continue;
+        }
+        if (seq_num != y) {
+            sender_packet.rtp.flags = RTP_ACK;
+            sender_packet.rtp.length = 0;
+            sender_packet.rtp.seq_num = y;
+            sender_packet.rtp.checksum = 0;
+            sender_packet.rtp.checksum = compute_checksum(&sender_packet, sizeof(rtp_header_t));
+            sendto(sockfd, &sender_packet, sizeof(rtp_header_t), 0, (struct sockaddr *)&lstAddr, sizeof(lstAddr));
+            LOG_DEBUG("Receiver: Received Fault Packet. Resend expected seq %d\n", y);
+        }
+        else {
+            if (receiver_packet.rtp.flags == RTP_FIN) {
+                LOG_DEBUG("Receiver: Connection need to be finished.\n");
+                fin(seq_num);
+                return;
+            }
+            else{
+                uint32_t len = receiver_packet.rtp.length;
+                memcpy(buffer, receiver_packet.payload, len);
+                fwrite(buffer, 1, len, fp);
+                LOG_DEBUG("Receiver: Save the data.\n");
+
+                sender_packet.rtp.flags = RTP_ACK;
+                sender_packet.rtp.length = 0;
+                sender_packet.rtp.checksum = 0;
+                sender_packet.rtp.seq_num = (++y);
+                sender_packet.rtp.checksum = compute_checksum(&sender_packet, sizeof(rtp_header_t));
+                sendto(sockfd, &sender_packet, sizeof(rtp_header_t), 0, (struct sockaddr *)&lstAddr, sizeof(lstAddr));
+                LOG_DEBUG("Receiver: Received Packet seq %d\n", y - 1);
+            }
+        }
+        t = clock();
     }
     LOG_FATAL("Receiver: Disconnected.\n");
 }

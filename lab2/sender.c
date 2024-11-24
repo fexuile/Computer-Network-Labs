@@ -20,13 +20,13 @@ socklen_t addr_len;
 rtp_packet_t send_packet, receiver_packet;
 rtp_packet_t packets[MAX_WINDOW_SIZE];
 int packets_size;
+bool ack[MAX_WINDOW_SIZE];
 
 bool checksum(rtp_packet_t packet) {
-    int check_sum = packet.rtp.checksum;
+    uint32_t check_sum = packet.rtp.checksum;
     packet.rtp.checksum = 0;
-    int calc_check_sum = compute_checksum(&packet, sizeof(rtp_header_t) + packet.rtp.length);
-    if(check_sum != calc_check_sum) return false;
-    return true;
+    uint32_t calc_check_sum = compute_checksum(&packet, sizeof(rtp_header_t) + packet.rtp.length);
+    return check_sum == calc_check_sum;
 }
 
 bool out_of_window(uint32_t seq, uint32_t start, int size) {
@@ -37,14 +37,14 @@ bool out_of_window(uint32_t seq, uint32_t start, int size) {
     return true;
 }
 
-void resend_loop(int fd, void* buffer, size_t size, const struct sockaddr *Addr, socklen_t *addr_len, rtp_header_flag_t Flags) {
+void resend_loop(int fd, void* buffer, size_t size, const struct sockaddr *Addr, socklen_t *len, rtp_header_flag_t Flags) {
     int flag = 0;
     clock_t t = clock();
     while(flag <= 50) {
         flag++; t = clock();
         while((double)(clock() - t) / CLOCKS_PER_SEC < 0.1) {
-            int recv_byte = recvfrom(fd, &receiver_packet, sizeof(receiver_packet), MSG_DONTWAIT, Addr, &addr_len);
-            if(recv_byte == 0 || !checksum(receiver_packet)) continue;
+            int recv_byte = recvfrom(fd, &receiver_packet, sizeof(receiver_packet), MSG_DONTWAIT, Addr, len);
+            if(recv_byte <= 0 || !checksum(receiver_packet)) continue;
             if(receiver_packet.rtp.flags & Flags) {
                 flag = -1;
                 LOG_DEBUG("Sender: received Needed packet\n");
@@ -52,10 +52,10 @@ void resend_loop(int fd, void* buffer, size_t size, const struct sockaddr *Addr,
             }
         }
         if(flag == -1) break;
-        sendto(fd, buffer, size, 0, Addr, sizeof(Addr));
+        sendto(fd, buffer, size, 0, Addr, sizeof(*Addr));
         LOG_DEBUG("Sender: resent My packet\n");
     }
-    if(flag > 50) LOG_FATAL("Sender: No Need Flag packet. Exiting..\n");
+    if(flag > 50) LOG_FATAL("Sender: Waiting too long. Exiting..\n");
 }
 
 void conn() {
@@ -74,7 +74,6 @@ void conn() {
     send_packet.rtp.flags = RTP_SYN;
     send_packet.rtp.checksum = 0;
     send_packet.rtp.checksum = compute_checksum(&send_packet, sizeof(rtp_header_t) + send_packet.rtp.length);
-    memset(send_packet.payload, 0, PAYLOAD_MAX);
     sendto(sockfd, &send_packet, sizeof(rtp_header_t), 0, (struct sockaddr *)&dstAddr, sizeof(dstAddr));
     LOG_DEBUG("Sender: sent SYN packet\n");
 
@@ -93,7 +92,7 @@ void conn() {
     int t = clock();
     while(clock() - t < 2000) {
         int recv_byte = recvfrom(sockfd, &receiver_packet, sizeof(rtp_packet_t), MSG_DONTWAIT, (struct sockaddr *)&dstAddr, &addr_len);
-        if(recv_byte > 0 && receiver_packet.rtp.flags & (RTP_ACK | RTP_SYN)) {
+        if(recv_byte > 0 && checksum(receiver_packet) && (receiver_packet.rtp.flags & (RTP_ACK | RTP_SYN))) {
             LOG_DEBUG("Sender: received SYN-ACK packet again %d %d\n", receiver_packet.rtp.seq_num, receiver_packet.rtp.flags);
             sendto(sockfd, &send_packet, sizeof(rtp_header_t), 0, (struct sockaddr *)&dstAddr, sizeof(dstAddr));
             LOG_DEBUG("Sender: sent ACK packet again\n");
@@ -112,11 +111,8 @@ void move_on(uint32_t l, uint32_t r) {
 }
 
 void resend_all_packet() {
-    for(int i = 0; i < packets_size; i++) {
+    for(int i = 0; i < packets_size; i++) 
         sendto(sockfd, &packets[i], sizeof(rtp_header_t) + packets[i].rtp.length, 0, (struct sockaddr *)&dstAddr, sizeof(dstAddr));
-        printf("%d ", packets[i].rtp.seq_num);
-    }
-    puts("");
     LOG_DEBUG("Sender: Resend ALL window packets.\n");
 }
 
@@ -150,12 +146,14 @@ void GBN() {
                     finished = 1;
                     break;
                 }
+                t = clock();
             }
             int recv_byte = recvfrom(sockfd, &receiver_packet, sizeof(rtp_packet_t), MSG_DONTWAIT, (struct sockaddr *)&dstAddr, &addr_len);
             if(recv_byte > 0 && checksum(receiver_packet) && receiver_packet.rtp.flags == RTP_ACK) {
                 move_on(send_base, receiver_packet.rtp.seq_num);
                 send_base = receiver_packet.rtp.seq_num;
                 if (send_base != next_seq_num) t = clock();
+                
                 LOG_DEBUG("Sender: received ACK packet %d\n", receiver_packet.rtp.seq_num - 1);
             }
         }
@@ -167,36 +165,78 @@ void GBN() {
     LOG_DEBUG("Sender: sent all packets\n");
 }
 
+void resend_noack_packet() {
+    for(int i = 0; i < packets_size; i++) 
+        if (!ack[i]) {
+            sendto(sockfd, &packets[i], sizeof(rtp_header_t) + packets[i].rtp.length, 0, (struct sockaddr *)&dstAddr, sizeof(dstAddr));
+            LOG_DEBUG("Sender: resend seq_num %d ID:%d\n", packets[i].rtp.seq_num, i);
+        }
+    LOG_DEBUG("Sender: Resend ALL No ACK packets.\n");
+}
+
+void move_on_SR(uint32_t *start, int size) {
+    uint32_t i = 0;
+    for(; size > 0; size--, i++)
+        if(!ack[i]) {
+            *start += i;
+            packets_size -= i;
+            break;
+        }
+    if(!size) {
+        packets_size = 0;
+        *start += i;
+        return;
+    }
+    for(int j = 0; j < packets_size; j++) {
+        packets[j] = packets[j + i];
+        ack[j] = ack[j + i];
+    }
+}
+
 void SR() {
-    int send_base = x - 1;
-    int next_seq_num = x;
-    int N = window_size;
+    uint32_t send_base = x;
+    uint32_t next_seq_num = x;
+    int N = window_size, finished = 0;
     FILE *fp = fopen(file_path, "rb");
     if(fp == NULL) {
         LOG_FATAL("Sender: failed to open file\n");
     }
+    clock_t t = clock();
     char *buffer = (char*)malloc(MTU_SIZE);
-    int len = fread(buffer, 1 , MTU_SIZE, fp);
-    while(next_seq_num <= send_base + N) {
-        if(len != 0) {
-            send_packet.rtp.seq_num = next_seq_num;
-            send_packet.rtp.length = len;
-            send_packet.rtp.flags = 0;
-            memcpy(send_packet.payload, buffer, len);
-            send_packet.rtp.checksum = 0;
-            send_packet.rtp.checksum = compute_checksum(&send_packet, sizeof(rtp_header_t) + send_packet.rtp.length);
-            sendto(sockfd, &send_packet, sizeof(rtp_header_t) + send_packet.rtp.length, 0, (struct sockaddr *)&dstAddr, sizeof(dstAddr));
-            LOG_DEBUG("Sender: sent packet %d %d\n", next_seq_num, len);
-            next_seq_num++;
-            len = fread(buffer, 1 , MTU_SIZE, fp);
+    while(1) {
+        while((double)(clock() - t) / CLOCKS_PER_SEC < 0.1) {
+            if(!out_of_window(next_seq_num, send_base, window_size)) {
+                int len = fread(buffer, 1, MTU_SIZE, fp);
+                if(len != 0) {
+                    send_packet.rtp.seq_num = next_seq_num;
+                    send_packet.rtp.length = len;
+                    send_packet.rtp.flags = 0;
+                    memcpy(send_packet.payload, buffer, len);
+                    send_packet.rtp.checksum = 0;
+                    send_packet.rtp.checksum = compute_checksum(&send_packet, sizeof(rtp_header_t) + send_packet.rtp.length);
+                    sendto(sockfd, &send_packet, sizeof(rtp_header_t) + send_packet.rtp.length, 0, (struct sockaddr *)&dstAddr, sizeof(dstAddr));
+                    LOG_DEBUG("Sender: sent packet %d\n", next_seq_num);
+                    next_seq_num++;
+                    ack[packets_size] = 0;
+                    packets[packets_size++] = send_packet;
+                }
+                else if(send_base == next_seq_num) {
+                    finished = 1;
+                    break;
+                }
+            }
+            int recv_byte = recvfrom(sockfd, &receiver_packet, sizeof(rtp_packet_t), MSG_DONTWAIT, (struct sockaddr *)&dstAddr, &addr_len);
+            if(recv_byte > 0 && checksum(receiver_packet) && receiver_packet.rtp.flags == RTP_ACK) {
+                LOG_DEBUG("Sender: Receive seq_num %d ID:%d\n", receiver_packet.rtp.seq_num, receiver_packet.rtp.seq_num - send_base);
+                if (!out_of_window(receiver_packet.rtp.seq_num, send_base, window_size)) {
+                    ack[receiver_packet.rtp.seq_num - send_base] = 1;
+                    if(receiver_packet.rtp.seq_num == send_base) move_on_SR(&send_base, packets_size);
+                }
+            } 
         }
-        else if(send_base == next_seq_num - 1) break;
-        recvfrom(sockfd, &receiver_packet, sizeof(rtp_packet_t), 0, (struct sockaddr *)&dstAddr, &addr_len);
-        if(receiver_packet.rtp.flags != RTP_ACK) {
-            LOG_FATAL("Sender: ACK packet is corrupted\n");
-        }
-        send_base++;
-        LOG_DEBUG("Sender: received ACK packet %d\n", receiver_packet.rtp.seq_num);
+        if(finished) break;
+        resend_noack_packet();
+        t = clock();
     }
     x = next_seq_num;
     LOG_DEBUG("Sender: sent all packets\n");
