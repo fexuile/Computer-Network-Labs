@@ -44,7 +44,7 @@ void resend_loop(int fd, void* buffer, size_t size, const struct sockaddr *Addr,
         flag++; t = clock();
         while((double)(clock() - t) / CLOCKS_PER_SEC < 0.1) {
             int recv_byte = recvfrom(fd, &receiver_packet, sizeof(receiver_packet), MSG_DONTWAIT, Addr, len);
-            if(recv_byte <= 0 || !checksum(receiver_packet)) continue;
+            if(recv_byte <= 0 || recv_byte != receiver_packet.rtp.length + sizeof(rtp_header_t) || !checksum(receiver_packet)) continue;
             if(receiver_packet.rtp.flags & Flags) {
                 flag = -1;
                 LOG_DEBUG("Sender: received Needed packet\n");
@@ -149,7 +149,7 @@ void GBN() {
                 t = clock();
             }
             int recv_byte = recvfrom(sockfd, &receiver_packet, sizeof(rtp_packet_t), MSG_DONTWAIT, (struct sockaddr *)&dstAddr, &addr_len);
-            if(recv_byte > 0 && checksum(receiver_packet) && receiver_packet.rtp.flags == RTP_ACK) {
+            if(recv_byte > 0 && recv_byte == receiver_packet.rtp.length + sizeof(rtp_header_t) && checksum(receiver_packet) && receiver_packet.rtp.flags == RTP_ACK) {
                 move_on(send_base, receiver_packet.rtp.seq_num);
                 send_base = receiver_packet.rtp.seq_num;
                 if (send_base != next_seq_num) t = clock();
@@ -226,7 +226,7 @@ void SR() {
                 }
             }
             int recv_byte = recvfrom(sockfd, &receiver_packet, sizeof(rtp_packet_t), MSG_DONTWAIT, (struct sockaddr *)&dstAddr, &addr_len);
-            if(recv_byte > 0 && checksum(receiver_packet) && receiver_packet.rtp.flags == RTP_ACK) {
+            if(recv_byte > 0 && recv_byte == receiver_packet.rtp.length + sizeof(rtp_header_t) && checksum(receiver_packet) && receiver_packet.rtp.flags == RTP_ACK) {
                 LOG_DEBUG("Sender: Receive seq_num %d ID:%d\n", receiver_packet.rtp.seq_num, receiver_packet.rtp.seq_num - send_base);
                 if (!out_of_window(receiver_packet.rtp.seq_num, send_base, window_size)) {
                     ack[receiver_packet.rtp.seq_num - send_base] = 1;
